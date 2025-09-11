@@ -11,7 +11,9 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
-
+from django.db import transaction, IntegrityError
+import traceback
+import copy
 from django.contrib.auth import get_user_model
 
 from .models import (
@@ -57,6 +59,9 @@ class ProjectTemplateViewSet(viewsets.ModelViewSet):
     queryset = ProjectTemplate.objects.filter(active=True)
     permission_classes = [IsAuthenticated]
     serializer_class = ProjectTemplateSerializer
+    
+    lookup_field = "slug"
+    lookup_value_regex = r"[-a-zA-Z0-9_]+"
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -86,6 +91,83 @@ class ServiceTemplateViewSet(viewsets.ModelViewSet):
         if project_id:
             return ServiceTemplate.objects.filter(project_id=project_id, active=True)
         return ServiceTemplate.objects.filter(active=True)
+    
+    @action(detail=False, methods=['post'], url_path='bulk_create')
+    def bulk_create(self, request):
+        """
+        Bulk-create multiple ServiceTemplate objects in one request.
+        Normalizes envs found under build_config.env -> env_vars for serializer.
+        """
+        data = request.data
+        print(f'\n Data we got {data}\n')
+
+        # Require an array
+        if not isinstance(data, list):
+            return Response({"detail": "Expected a list/array of service objects."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # If frontend provided a single project_id as query param, inject it into each item
+        project_id = request.query_params.get('project_id')
+
+        # Normalize and defensively prepare list
+        normalized = []
+        for raw_item in data:
+            item = copy.deepcopy(raw_item)  # avoid mutating original
+            if project_id and not item.get("project"):
+                item["project"] = project_id
+
+            # 1) If the frontend sends `build_config.env` (common), move it to top-level `env_vars`
+            build_cfg = item.get("build_config") or {}
+            env_from_build = None
+            if isinstance(build_cfg, dict):
+                env_from_build = build_cfg.pop("env", None)
+                # if build_config had env, remove it to avoid double-handling
+                if env_from_build is not None:
+                    item["build_config"] = build_cfg  # updated (with env removed)
+                    # normalize shape: list of {name, value}
+                    if isinstance(env_from_build, list):
+                        item["env_vars"] = env_from_build
+                    else:
+                        # if frontend gave a dict, convert to list of {name,value}
+                        if isinstance(env_from_build, dict):
+                            item["env_vars"] = [{"name": k, "value": v} for k, v in env_from_build.items()]
+                        else:
+                            # unknown shape: ignore or set empty
+                            item["env_vars"] = []
+
+            # 2) Accept old key `build_env` or `env_vars` if present: prefer explicit env_vars
+            if "build_env" in item and "env_vars" not in item:
+                # build_env maybe a list or dict — normalize to env_vars (list of {name, value})
+                be = item.pop("build_env")
+                if isinstance(be, list):
+                    item["env_vars"] = be
+                elif isinstance(be, dict):
+                    item["env_vars"] = [{"name": k, "value": v} for k, v in be.items()]
+                else:
+                    item["env_vars"] = []
+
+            normalized.append(item)
+
+        serializer = ServiceTemplateSerializer(data=normalized, many=True, context={'request': request})
+        try:
+            serializer.is_valid(raise_exception=True)
+        except Exception as exc:
+            # return the serializer errors for debugging
+            return Response({"detail": "validation_error", "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                created = serializer.save()
+                resp_serializer = ServiceTemplateSerializer(created, many=True, context={'request': request})
+                return Response(resp_serializer.data, status=status.HTTP_201_CREATED)
+        except IntegrityError as e:
+            return Response({"detail": "Database integrity error", "error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            # log full traceback server-side for debugging
+            tb = traceback.format_exc()
+            logger.exception("Unexpected error in bulk_create: %s", tb)
+            return Response({"detail": "Unexpected error creating service templates", "error": str(e), "trace": tb}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
 
 
 class TenantViewSet(viewsets.ModelViewSet):

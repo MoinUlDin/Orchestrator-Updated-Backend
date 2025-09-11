@@ -35,11 +35,67 @@ class IntegrationSecretSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
+class EnvVarSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255)
+    value = serializers.CharField(allow_blank=True, allow_null=True)
+
+    def validate_name(self, v):
+        v = v.strip()
+        if not v:
+            raise serializers.ValidationError("Env var name cannot be empty")
+        return v
+
 class ServiceTemplateSerializer(serializers.ModelSerializer):
+    env_vars = EnvVarSerializer(many=True, required=False)
+    # expose internal_provision_token_secret as a PK (or nested if you prefer)
+    internal_provision_token_secret = serializers.PrimaryKeyRelatedField(
+        queryset=IntegrationSecret.objects.all(), allow_null=True, required=False
+    )
+
     class Meta:
         model = ServiceTemplate
+        # keep same fields as before, but ensure env_vars present
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_env_vars(self, value):
+        # ensure names unique
+        names = [v.get('name') for v in value if v.get('name')]
+        if len(names) != len(set(names)):
+            raise serializers.ValidationError("Duplicate environment variable names are not allowed.")
+        return value
+
+    def _pop_env_vars(self, validated_data):
+        # helper to safely pop env_vars (works when not present)
+        return validated_data.pop('env_vars', None) or []
+
+    def create(self, validated_data, **kwargs):
+        """
+        Create a ServiceTemplate. Be defensive:
+         - accept created_by passed as kwarg (serializer.save(created_by=...))
+         - remove any 'created_by' key from validated_data to avoid duplication
+         - handle env_vars as before
+        """
+        # pop env vars
+        env = self._pop_env_vars(validated_data)
+        # Create instance
+        instance = ServiceTemplate.objects.create(**validated_data)
+
+        # persist env_vars JSON list (if provided)
+        if env:
+            instance.env_vars = env
+            instance.save(update_fields=["env_vars"])
+
+        return instance
+
+    def update(self, instance, validated_data):
+        env = self._pop_env_vars(validated_data)
+        for attr, val in validated_data.items():
+            setattr(instance, attr, val)
+        if env is not None:
+            instance.env_vars = env
+        instance.save()
+        return instance
 
 
 class ServiceTemplateDetailSerializer(ServiceTemplateSerializer):

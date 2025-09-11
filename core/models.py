@@ -13,7 +13,6 @@ class ProjectTemplate(models.Model):
         ('postgres', 'PostgreSQL'),
         ('mysql', 'MySQL'),
         ('mongodb', 'MongoDB'),
-        ('other', 'Other'),
     ]
     
     name = models.CharField(max_length=100)
@@ -22,7 +21,6 @@ class ProjectTemplate(models.Model):
     base_domain = models.CharField(max_length=255)
     db_required = models.BooleanField(default=False)
     db_type = models.CharField(max_length=20, choices=DB_TYPE_CHOICES, default='postgres')
-    default_env = models.JSONField(default=dict, blank=True)
     notify_emails = models.JSONField(default=list, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(default=timezone.now)
@@ -60,7 +58,6 @@ class ServiceTemplate(models.Model):
         ('db', 'Database'),
         ('worker', 'Worker'),
         ('cron', 'Cron Job'),
-        ('other', 'Other'),
     ]
     
     project = models.ForeignKey(ProjectTemplate, 
@@ -71,6 +68,7 @@ class ServiceTemplate(models.Model):
     repo_url = models.URLField(blank=True, null=True)
     repo_branch = models.CharField(max_length=100, blank=True, null=True)
     build_config = models.JSONField(default=dict)
+    env_vars = models.JSONField(default=list, blank=True, null=True) 
     expose_domain = models.BooleanField(default=False)
     internal_provision_endpoint = models.CharField(max_length=255, blank=True, null=True)
     internal_provision_token_secret = models.ForeignKey(
@@ -83,6 +81,7 @@ class ServiceTemplate(models.Model):
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
+
 
     class Meta:
         ordering = ['order']

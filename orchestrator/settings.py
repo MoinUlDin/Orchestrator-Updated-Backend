@@ -71,6 +71,7 @@ TEMPLATES = [
 ]
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
+    "http://localhost:5173"
 ]
 # or for dev quickly:
 # CORS_ALLOW_ALL_ORIGINS = True
