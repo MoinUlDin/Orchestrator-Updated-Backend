@@ -5,8 +5,9 @@ import logging
 from django.db import transaction
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
-
-from rest_framework import viewsets, status
+from django.db.models import Count, Q, Prefetch
+from rest_framework import status, viewsets
+import rest_framework
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -31,8 +32,11 @@ from .serializers import (
     DeploymentStepSerializer, DeploymentResumeSerializer, DeploymentStatusUpdateSerializer,
     StepStatusUpdateSerializer, JobRecordSerializer, JobRecordDetailSerializer,
     AuditEntrySerializer, AuditEntryDetailSerializer, HealthCheckSerializer,
-    NotificationSerializer
+    NotificationSerializer, ProjectTemplateDetailSerializer
 )
+from .scheduler import add_job
+from .tasks import main_deployment_function
+from django.utils import timezone
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -63,17 +67,124 @@ class ProjectTemplateViewSet(viewsets.ModelViewSet):
     lookup_field = "slug"
     lookup_value_regex = r"[-a-zA-Z0-9_]+"
 
+    def get_serializer_class(self):
+        # Return the detailed serializer for retrieve to include nested services
+        if self.action == "retrieve":
+            return ProjectTemplateDetailSerializer
+        return ProjectTemplateSerializer
+    
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+    
+    @action(detail=True, methods=["get"], url_path="fetch_tenant_details", permission_classes=[IsAuthenticated])
+    def fetch_tenant_details(self, request, slug=None):
+        """
+        Return project detail + tenants (serialized) + tenant service instances.
+        Quick-stats (total_instances / running / deploying / stopped) are computed
+        from Tenant.status (NOT TenantService).
+        """
+        project = self.get_object()
+        if not project:
+            return Response({"detail": 'no project found for the given slug'}, status=status.HTTP_400_BAD_REQUEST)
 
+        project_serializer = ProjectTemplateSerializer(project)
+        # --- TENANTS (serialized) ---
+        tenants_qs = Tenant.objects.filter(project=project).only(
+            "id", "name", "subdomain", "status", "created_at", "updated_at"
+        ).order_by("created_at")
+        tenants_serialized = TenantDetailSerializer(tenants_qs, many=True)
 
-class IntegrationSecretViewSet(viewsets.ModelViewSet):
-    queryset = IntegrationSecret.objects.all()
-    permission_classes = [IsAuthenticated]
-    serializer_class = IntegrationSecretSerializer
+        # --- QUICK STATS (based on tenant.status) ---
+        total_tenants = tenants_qs.count()
 
-    def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        # Mapping: adjust these groups if you'd like different semantics
+        running = tenants_qs.filter(status="running").count()
+        # consider 'pending' and provisioning states as 'deploying' (i.e. not yet running)
+        deploying = tenants_qs.filter(
+            status__in=["pending", "provisioning", "waiting_for_internal_provision"]
+        ).count()
+        # treat failed/completed as stopped (adjust if you prefer completed != stopped)
+        stopped = tenants_qs.filter(status__in=["failed", "completed"]).count()
+
+        # --- INSTANCES (tenant services) ---
+        tenant_services_qs = (
+            TenantService.objects.filter(tenant__project=project)
+            .select_related("tenant", "service_template")
+        )
+
+        instances = []
+        for ts in tenant_services_qs:
+            instance_id = (
+                getattr(ts, "app_id", None)
+                or getattr(ts, "instance_id", None)
+                or getattr(ts, "name", None)
+                or f"{ts.tenant.subdomain}-{getattr(ts, 'service_type', 'service')}"
+            )
+
+            environment = getattr(ts.tenant, "environment", None) or getattr(ts, "environment", None)
+            if not environment:
+                tname = (ts.tenant.name or "").lower()
+                if "prod" in tname or "production" in tname:
+                    environment = "Production"
+                elif "stage" in tname:
+                    environment = "Staging"
+                elif "dev" in tname:
+                    environment = "Development"
+                else:
+                    environment = (getattr(ts, "service_type", None) or "Unknown").capitalize()
+
+            # per-instance status (use different name so we don't shadow imported 'status')
+            if getattr(ts, "deployed", False) or getattr(ts, "last_deployed_at", None):
+                inst_status = "Running"
+            elif getattr(ts, "deploy_triggered", False) or (getattr(ts, "health_status", "") or "").lower().startswith("deploy"):
+                inst_status = "Deploying"
+            else:
+                inst_status = "Stopped"
+
+            version = getattr(ts, "version", None) or getattr(ts, "app_version", None)
+            meta = getattr(ts, "meta", None) or getattr(ts, "detail", None) or {}
+            if not version and isinstance(meta, dict):
+                version = meta.get("version") or meta.get("app_version")
+
+            url = getattr(ts, "domain", None) or getattr(ts, "domain_name", None) or None
+            resources = getattr(ts, "resources", None)
+            deployed_at = getattr(ts, "last_deployed_at", None)
+
+            instances.append(
+                {
+                    "id": ts.id,
+                    "instance_id": instance_id,
+                    "environment": environment,
+                    "status": inst_status,
+                    "version": version,
+                    "url": url,
+                    "resources": resources,
+                    "deployed_at": deployed_at,
+                    "tenant": {
+                        "id": ts.tenant.id,
+                        "name": ts.tenant.name,
+                        "subdomain": ts.tenant.subdomain,
+                        "status": ts.tenant.status,
+                    },
+                }
+            )
+
+        instances = sorted(instances, key=lambda i: (i["environment"], str(i["instance_id"])))
+
+        payload = {
+            'project': project_serializer.data,
+            "tenants": tenants_serialized.data,
+            "last_deployment": max((i["deployed_at"] for i in instances if i["deployed_at"]), default=None),
+            "quick_stats": {
+                "total_instances": total_tenants,
+                "running": running,
+                "deploying": deploying,
+                "stopped": stopped,
+            },
+            "instances": instances,
+        }
+
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class ServiceTemplateViewSet(viewsets.ModelViewSet):
@@ -167,8 +278,7 @@ class ServiceTemplateViewSet(viewsets.ModelViewSet):
             tb = traceback.format_exc()
             logger.exception("Unexpected error in bulk_create: %s", tb)
             return Response({"detail": "Unexpected error creating service templates", "error": str(e), "trace": tb}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            
-
+        
 
 class TenantViewSet(viewsets.ModelViewSet):
     """
@@ -195,13 +305,12 @@ class TenantViewSet(viewsets.ModelViewSet):
             return Tenant.objects.filter(project_id=project_id, active=True)
         return Tenant.objects.filter(active=True)
 
-    def perform_create(self, serializer):
-        # serializer is already validated by DRF at this point
-        validated = getattr(serializer, "validated_data", None)
-        if not validated:
-            # Shouldn't happen normally; safeguard
-            raise ValidationError({"detail": "Invalid tenant payload."})
-
+    def create(self, request, *args, **kwargs):
+        # Validate the request data
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+        
         project = validated.get("project")
         subdomain_raw = validated.get("subdomain", "")
         subdomain = sanitize_subdomain(subdomain_raw)
@@ -216,8 +325,16 @@ class TenantViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             tenant = serializer.save(created_by=self.request.user, subdomain=subdomain)
 
-            # At this point TenantCreateSerializer.create() should have created TenantService objects
-            # If you prefer the view to create them instead, move that logic here and remove it from serializer.
+            # Clone service templates into TenantService
+            for st in tenant.project.service_templates.all():
+                TenantService.objects.create(
+                    tenant=tenant,
+                    service_template=st,
+                    name=st.name,
+                    service_type=st.service_type,
+                    repo_url=st.repo_url,
+                    repo_branch=st.repo_branch,
+                )
 
             # Create initial deployment
             deployment = Deployment.objects.create(
@@ -226,19 +343,42 @@ class TenantViewSet(viewsets.ModelViewSet):
                 trigger_reason='initial',
                 status='pending'
             )
-
-            # Create deployment steps
-            self._create_deployment_steps(deployment, tenant)
-
-            # Enqueue background worker to process deployment (do not run in the request thread)
-            # Example placeholder: enqueue_deployment(deployment.id)
-            # Implement actual enqueueing using Celery/APS cheduler.
-            logger.info("Tenant %s created and deployment %s enqueued (implement enqueue).", tenant.id, deployment.id)
-
+            self._create_deployment_steps(deployment=deployment, tenant=tenant)
+            
+            # Schedule the deployment job
+            try:
+                job_id = f"deployment_{deployment.id}"
+                add_job(
+                    func=main_deployment_function,
+                    trigger="date",
+                    run_date=timezone.now(),  # schedule immediately
+                    args=[deployment.id],
+                    id=job_id,
+                    replace_existing=True,
+                    max_instances=1,
+                )
+                logger.info("Tenant %s created and deployment %s scheduled (job_id=%s).", tenant.id, deployment.id, job_id)
+                # store job_id in meta for traceability
+                deployment.meta = deployment.meta or {}
+                deployment.meta['scheduler_job_id'] = job_id
+                deployment.save(update_fields=['meta'])
+            except Exception as e:
+                # Scheduling failed; log and leave deployment in pending so it can be resumed later
+                logger.exception("Failed to schedule deployment %s for tenant %s: %s", deployment.id, tenant.id, e)
+        
+        # Get the serialized data for the response
+        headers = self.get_success_headers(serializer.data)
+        
+        # Add deployment_id to the response data
+        response_data = serializer.data
+        response_data['deployment_id'] = deployment.id
+        
+        return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
+            
     def _create_deployment_steps(self, deployment: Deployment, tenant: Tenant):
         steps_data = []
         order = 1
-
+        print("\n Creating Steps Project\n")
         # Project creation
         steps_data.append({
             'deployment': deployment,
@@ -431,38 +571,32 @@ class DeploymentViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(triggered_by=self.request.user)
 
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         deployment = self.get_object()
-        serializer = DeploymentResumeSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # mark deployment as running and set start time if not set
-        deployment.status = 'running'
-        if not deployment.started_at:
-            deployment.started_at = timezone.now()
-        deployment.save()
+        # if already succeeded, nothing to do
+        if deployment.status == "succeeded":
+            return Response({"detail": "Deployment already succeeded."}, status=status.HTTP_400_BAD_REQUEST)
 
-        resume_from_step = serializer.validated_data.get('resume_from_step')
-        if resume_from_step:
-            steps = deployment.steps.order_by('order')
-            found = False
-            for step in steps:
-                if step.step_key == resume_from_step:
-                    found = True
-                if found and step.status in ['failed', 'pending']:
-                    step.status = 'pending'
-                    step.save()
-        else:
-            # mark all failed steps as pending
-            deployment.steps.filter(status='failed').update(status='pending')
+        # schedule the job to run immediately (replace existing job if any)
+        job_id = f"deployment_{deployment.id}"
+        add_job(
+            func=main_deployment_function,
+            trigger="date",
+            run_date=timezone.now(),
+            args=[deployment.id],
+            id=job_id,
+            replace_existing=True,
+            max_instances=1,
+        )
 
-        # enqueue background worker to resume processing
-        logger.info("Deployment %s resumed by %s", deployment.id, request.user)
+        # update status to pending/running based on your convention
+        deployment.status = "pending"
+        deployment.save(update_fields=["status", "updated_at"])
 
-        return Response({'message': 'Deployment resume requested', 'deployment_id': deployment.id}, status=status.HTTP_202_ACCEPTED)
-
+        return Response({"detail": "Resume scheduled", "job_id": job_id}, status=status.HTTP_202_ACCEPTED)
+    
     @action(detail=True, methods=['post'])
     def update_status(self, request, pk=None):
         deployment = self.get_object()
@@ -479,6 +613,18 @@ class DeploymentViewSet(viewsets.ModelViewSet):
         deployment.save()
 
         return Response(DeploymentSerializer(deployment).data)
+    
+    @action(detail=True, methods=['get'], url_path='logs')
+    def logs(self, request, pk=None):
+        """
+        Return compact chronological logs for the given deployment.
+        Useful for UI to show what happened and which steps completed.
+        """
+        deployment = self.get_object()
+        meta = deployment.meta or {}
+        logs = meta.get('logs', [])
+        # Optionally you may want to limit how many logs are returned; for now return all
+        return Response({"deployment_id": deployment.id, "logs": logs})
 
 
 class DeploymentStepViewSet(viewsets.ModelViewSet):
@@ -547,25 +693,6 @@ class AuditEntryViewSet(viewsets.ReadOnlyModelViewSet):
         if user_id:
             return AuditEntry.objects.filter(user_id=user_id)
         return AuditEntry.objects.all()
-
-
-class HealthCheckViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticated]
-
-    def create(self, request):
-        serializer = HealthCheckSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        data = serializer.validated_data
-        tenant_service = get_object_or_404(TenantService, id=data['tenant_service_id'])
-
-        tenant_service.health_status = data['status']
-        if data.get('detail'):
-            tenant_service.detail = data['detail']
-        tenant_service.save()
-
-        return Response({'status': 'Health status updated'})
 
 
 class NotificationViewSet(viewsets.ViewSet):

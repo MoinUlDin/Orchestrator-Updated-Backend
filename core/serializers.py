@@ -17,13 +17,11 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ['id', 'email', 'first_name', 'last_name', 'role', 'profile_picture']
         read_only_fields = ['id', 'email', 'role']
 
-
 class ProjectTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProjectTemplate
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
-
 
 class IntegrationSecretSerializer(serializers.ModelSerializer):
     # Make encrypted_value write-only for security
@@ -33,7 +31,6 @@ class IntegrationSecretSerializer(serializers.ModelSerializer):
         model = IntegrationSecret
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
-
 
 class EnvVarSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
@@ -47,10 +44,6 @@ class EnvVarSerializer(serializers.Serializer):
 
 class ServiceTemplateSerializer(serializers.ModelSerializer):
     env_vars = EnvVarSerializer(many=True, required=False)
-    # expose internal_provision_token_secret as a PK (or nested if you prefer)
-    internal_provision_token_secret = serializers.PrimaryKeyRelatedField(
-        queryset=IntegrationSecret.objects.all(), allow_null=True, required=False
-    )
 
     class Meta:
         model = ServiceTemplate
@@ -97,11 +90,94 @@ class ServiceTemplateSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
 
+class ServiceTemplateDetailSerializer(serializers.ModelSerializer):
+    """
+    Full detail representation of a ServiceTemplate used in the ProjectTemplate detail view.
+    """
+    class Meta:
+        model = ServiceTemplate
+        # list explicit fields for clarity (you can switch to '__all__' if you prefer)
+        fields = [
+            "id",
+            "project",
+            "name",
+            "service_type",
+            "repo_url",
+            "repo_branch",
+            "build_config",
+            "env_vars",
+            "expose_domain",
+            "internal_provision_endpoint",
+            "internal_provision_token_secret",
+            "order",
+            "active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
 
-class ServiceTemplateDetailSerializer(ServiceTemplateSerializer):
-    # Nested representation of related objects
-    project = ProjectTemplateSerializer(read_only=True)
-    internal_provision_token_secret = IntegrationSecretSerializer(read_only=True)
+class ProjectTemplateDetailSerializer(serializers.ModelSerializer):
+    """
+    Project template detail including nested service templates and computed summary fields.
+    """
+    service_templates = ServiceTemplateDetailSerializer(many=True, read_only=True)
+    # computed fields
+    total_services = serializers.SerializerMethodField()
+    database_service = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProjectTemplate
+        fields = [
+            "id",
+            "name",
+            "slug",
+            "description",
+            "base_domain",
+            "db_required",
+            "db_type",
+            "notify_emails",
+            "active",
+            "created_by",
+            "created_at",
+            "updated_at",
+            "service_templates",
+            "total_services",
+            "database_service",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def get_total_services(self, obj: ProjectTemplate):
+        # Count active service templates
+        services_count = obj.service_templates.filter(active=True).count()
+        # If project requires db, consider db as one service
+        if obj.db_required:
+            return services_count + 1
+        return services_count
+
+    def get_database_service(self, obj: ProjectTemplate):
+        """
+        Returns a synthetic "db service" object (or None) when db_required=True.
+        This lets UI treat DB similarly to other services without storing a ServiceTemplate row.
+        """
+        if not obj.db_required:
+            return None
+        return {
+            "id": f"db-{obj.id}",
+            "project": obj.id,
+            "name": f"{obj.slug}-database",
+            "service_type": "db",
+            "repo_url": None,
+            "repo_branch": None,
+            "build_config": {},
+            "env_vars": [],
+            "expose_domain": False,
+            "internal_provision_endpoint": None,
+            "internal_provision_token_secret": None,
+            "order": 9999,
+            "active": True,
+            "db_type": obj.db_type,
+            "note": "Synthetic DB service created per-template configuration"
+        }
 
 class TenantSerializer(serializers.ModelSerializer):
     class Meta:
@@ -109,12 +185,27 @@ class TenantSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
 
-
 class TenantDetailSerializer(TenantSerializer):
     # Nested representation for detailed views
     project = ProjectTemplateSerializer(read_only=True)
     created_by = UserSerializer(read_only=True)
+    
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
 
+        # get latest deployment for this tenant
+        latest_deployment = instance.deployment.order_by("-created_at").first()
+
+        if latest_deployment:
+            data["deployment_id"] = latest_deployment.id
+            data["deployment_status"] = latest_deployment.status
+            data["deployment_trigger_reason"] = latest_deployment.trigger_reason
+        else:
+            data["deployment_id"] = None
+            data["deployment_status"] = None
+            data["deployment_trigger_reason"] = None
+
+        return data
 
 class TenantServiceSerializer(serializers.ModelSerializer):
     class Meta:
@@ -122,19 +213,16 @@ class TenantServiceSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at', 'last_deployed_at']
 
-
 class TenantServiceDetailSerializer(TenantServiceSerializer):
     # Nested representation for detailed views
     tenant = TenantSerializer(read_only=True)
     service_template = ServiceTemplateSerializer(read_only=True)
-
 
 class DeploymentStepSerializer(serializers.ModelSerializer):
     class Meta:
         model = DeploymentStep
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
-
 
 class DeploymentSerializer(serializers.ModelSerializer):
     # Include steps as nested objects in deployment detail
@@ -145,13 +233,11 @@ class DeploymentSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at', 'duration_seconds']
 
-
 class DeploymentDetailSerializer(DeploymentSerializer):
     # Nested representation for detailed views
     tenant = TenantSerializer(read_only=True)
     triggered_by = UserSerializer(read_only=True)
     steps = DeploymentStepSerializer(many=True, read_only=True)
-
 
 class DeploymentCreateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -159,19 +245,16 @@ class DeploymentCreateSerializer(serializers.ModelSerializer):
         fields = ['tenant', 'trigger_reason']
         # Other fields will be set automatically
 
-
 class JobRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobRecord
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
 
-
 class JobRecordDetailSerializer(JobRecordSerializer):
     # Nested representation for detailed views
     deployment = DeploymentSerializer(read_only=True)
     step = DeploymentStepSerializer(read_only=True)
-
 
 class AuditEntrySerializer(serializers.ModelSerializer):
     class Meta:
@@ -179,28 +262,23 @@ class AuditEntrySerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'created_at']
 
-
 class AuditEntryDetailSerializer(AuditEntrySerializer):
     # Nested representation for detailed views
     user = UserSerializer(read_only=True)
-
 
 # Specialized serializers for deployment operations
 class DeploymentResumeSerializer(serializers.Serializer):
     deployment_id = serializers.IntegerField()
     resume_from_step = serializers.CharField(required=False)
 
-
 class DeploymentStatusUpdateSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=Deployment.STATUS_CHOICES)
     message = serializers.CharField(required=False, allow_blank=True)
-
 
 class StepStatusUpdateSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=DeploymentStep.STATUS_CHOICES)
     message = serializers.CharField(required=False, allow_blank=True)
     meta = serializers.JSONField(required=False)
-
 
 # Serializer for tenant creation with services
 class TenantCreateSerializer(serializers.ModelSerializer):
@@ -215,6 +293,12 @@ class TenantCreateSerializer(serializers.ModelSerializer):
         if not re.match(r'^[a-z0-9-]{2,63}$', s):
             raise serializers.ValidationError("Subdomain must be 2-63 chars, letters, numbers or hyphen.")
         return s
+    
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        proj = instance.project
+        data['slug'] = proj.slug if proj else None
+        return data
     
     def create(self, validated_data):
         services = validated_data.pop('services', [])
@@ -238,13 +322,11 @@ class TenantServiceUpdateSerializer(serializers.ModelSerializer):
         model = TenantService
         fields = ['repo_url', 'repo_branch']
 
-
 # Health check serializers
 class HealthCheckSerializer(serializers.Serializer):
     tenant_service_id = serializers.IntegerField()
     status = serializers.ChoiceField(choices=TenantService.HEALTH_STATUS_CHOICES)
     detail = serializers.CharField(required=False, allow_blank=True)
-
 
 # Notification serializers
 class NotificationSerializer(serializers.Serializer):

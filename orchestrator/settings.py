@@ -1,19 +1,27 @@
 
 from datetime import timedelta
 from pathlib import Path
+from pathlib import Path
+from dotenv import load_dotenv
+import os
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+# optionally load .env in development
+load_dotenv(BASE_DIR / ".env")
 
+DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() in ("1", "true", "yes")
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "NOT_secure_use_only_Local_TEsting")
+if not SECRET_KEY and not DEBUG or SECRET_KEY=='NOT_secure_use_only_Local_TEsting':
+    raise Exception("Missing DJANGO_SECRET_KEY for production")
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+CORS_ALLOWED_ORIGINS = [
+    "https://abc.schoolcare.pk",
+]
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-93h6pk)g&%lq!9^f81*afk7ce-=*zxo8i=*m74*thj)=aos_g1'
 
 FIELD_ENCRYPTION_KEY = 'tg93UNJdqF9ZOmNmWlHXBQavakvYX2gqEVEnDXFIEvs='
-# SECURITY WARNING: don't run with debug turned on in production!
+
 DEBUG = True
 
 ALLOWED_HOSTS = []
@@ -159,3 +167,22 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# Email: simple console backend by default (dev)
+EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "noreply@example.com")
+
+# Dokploy / provisioning env (these will be read by the provisioner code)
+DOKPLOY_API = os.getenv("DOKPLOY_API", "")
+DOKPLOY_TOKEN = os.getenv("DOKPLOY_TOKEN", "")
+DOKPLOY_MAX_RETRY_DELAY_CAP = os.getenv("DOKPLOY_MAX_RETRY_DELAY_CAP", 90)
+PROVISION_CALLBACK_TOKEN = os.getenv("PROVISION_CALLBACK_TOKEN", "internal-provision-token")
+
+EMAIL_BACKEND='django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST='smtp.gmail.com'
+EMAIL_PORT=587
+EMAIL_USE_TLS=True
+EMAIL_HOST_USER=os.getenv("EMAIL_HOST_USER", None)
+EMAIL_HOST_PASSWORD=os.getenv("EMAIL_HOST_PASSWORD", None)
+DEFAULT_FROM_EMAIL=os.getenv("DEFAULT_FROM_EMAIL", None)

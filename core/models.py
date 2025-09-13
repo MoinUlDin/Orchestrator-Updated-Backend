@@ -1,3 +1,4 @@
+# core.models.py
 from django.db import models
 from django.core.validators import MinLengthValidator
 from django.utils import timezone
@@ -6,6 +7,25 @@ from django.conf import settings
 
 # Create your models here.
 User = settings.AUTH_USER_MODEL
+
+class IntegrationSecret(models.Model):
+    SECRET_TYPE_CHOICES = [
+        ('internal_provision_token', 'Internal Provision Token'),
+        ('dokploy_api', 'Dokploy API Key'),
+        ('other', 'Other'),
+    ]
+    
+    name = models.CharField(max_length=100)
+    secret_type = models.CharField(max_length=30, choices=SECRET_TYPE_CHOICES)
+    encrypted_value = EncryptedTextField()
+    project = models.ForeignKey("ProjectTemplate", related_name='secrets', on_delete=models.CASCADE, null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_rotated_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.secret_type})"
 
 
 class ProjectTemplate(models.Model):
@@ -31,26 +51,6 @@ class ProjectTemplate(models.Model):
         return self.name
 
 
-class IntegrationSecret(models.Model):
-    SECRET_TYPE_CHOICES = [
-        ('internal_provision_token', 'Internal Provision Token'),
-        ('dokploy_api', 'Dokploy API Key'),
-        ('other', 'Other'),
-    ]
-    
-    name = models.CharField(max_length=100)
-    secret_type = models.CharField(max_length=30, choices=SECRET_TYPE_CHOICES)
-    encrypted_value = EncryptedTextField()
-    project = models.ForeignKey(ProjectTemplate, related_name='secrets', on_delete=models.CASCADE, null=True, blank=True)
-    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
-    created_at = models.DateTimeField(default=timezone.now)
-    updated_at = models.DateTimeField(auto_now=True)
-    last_rotated_at = models.DateTimeField(null=True, blank=True)
-
-    def __str__(self):
-        return f"{self.name} ({self.secret_type})"
-
-
 class ServiceTemplate(models.Model):
     SERVICE_TYPE_CHOICES = [
         ('backend', 'Backend Service'),
@@ -71,12 +71,7 @@ class ServiceTemplate(models.Model):
     env_vars = models.JSONField(default=list, blank=True, null=True) 
     expose_domain = models.BooleanField(default=False)
     internal_provision_endpoint = models.CharField(max_length=255, blank=True, null=True)
-    internal_provision_token_secret = models.ForeignKey(
-        IntegrationSecret, 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True
-    )
+    internal_provision_token_secret = models.CharField(max_length=255, blank=True, null=True)
     order = models.IntegerField(default=0)
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(default=timezone.now)
@@ -179,7 +174,7 @@ class Deployment(models.Model):
         ('succeeded', 'Succeeded'),
     ]
     
-    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE)
+    tenant = models.ForeignKey(Tenant, related_name='deployment', on_delete=models.CASCADE)
     triggered_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     trigger_reason = models.CharField(max_length=20, choices=TRIGGER_REASON_CHOICES)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
