@@ -172,11 +172,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Email: simple console backend by default (dev)
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "noreply@example.com")
-
+# retry and delays
+DOKPLOY_MAX_RETRIES = os.getenv("DOKPLOY_MAX_RETRIES", 5)
+DOKPLOY_MAX_RETRY_DELAY_CAP = os.getenv("DOKPLOY_MAX_RETRY_DELAY_CAP", 120)
 # Dokploy / provisioning env (these will be read by the provisioner code)
 DOKPLOY_API = os.getenv("DOKPLOY_API", "")
 DOKPLOY_TOKEN = os.getenv("DOKPLOY_TOKEN", "")
-DOKPLOY_MAX_RETRY_DELAY_CAP = os.getenv("DOKPLOY_MAX_RETRY_DELAY_CAP", 90)
 PROVISION_CALLBACK_TOKEN = os.getenv("PROVISION_CALLBACK_TOKEN", "internal-provision-token")
 
 EMAIL_BACKEND='django.core.mail.backends.smtp.EmailBackend'

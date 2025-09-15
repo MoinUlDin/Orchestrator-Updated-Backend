@@ -29,17 +29,16 @@ class DokployError(Exception):
 
 def _sleep_with_backoff(attempt: int, base_delay: float=1):
     # exponential backoff: base_delay * 2^(attempt-1)
-    print("\n insdie sleep_with_backoff \n")
     delay = base_delay * (2 ** (attempt - 1))
     # small safety cap
-    max_cap = getattr(settings, "DOKPLOY_MAX_RETRY_DELAY_CAP", 60)
+    max_cap = getattr(settings, "DOKPLOY_MAX_RETRY_DELAY_CAP", 120)
     if delay > max_cap:
         delay = max_cap
-    print(f"\n we will now wait for {delay}  \n")
+    print(f"\n we will now wait for {delay} seconds  \n")
     time.sleep(delay)
 
 
-def _post(path: str, json: dict = None, timeout: int = 40, retry: bool = True,
+def _post(path: str, json: dict = None, timeout: int = 60, retry: bool = True,
           max_retries: int = None, base_delay: float = None):
     """
     POST wrapper with optional retries.
@@ -95,7 +94,7 @@ def _post(path: str, json: dict = None, timeout: int = 40, retry: bool = True,
                 raise DokployError(f"POST {path} failed after {max_retries} attempts: {e}") from e
 
 
-def _get(path: str, params: dict = None, timeout: int = 30, retry: bool = True,
+def _get(path: str, params: dict = None, timeout: int = 50, retry: bool = True,
          max_retries: int = None, base_delay: float = None):
     """
     GET wrapper with optional retries.
@@ -146,7 +145,7 @@ def _get(path: str, params: dict = None, timeout: int = 30, retry: bool = True,
 # ======================= Helpers =============================
 # =============================================================
 # ----------------------- Project -----------------------------
-def create_project(name: str, description: str = "", timeout: int = 40) -> Any:
+def create_project(name: str, description: str = "", timeout: int = 50) -> Any:
     """
     POST /project/create
     Returns parsed response or raises DokployError.
@@ -154,7 +153,7 @@ def create_project(name: str, description: str = "", timeout: int = 40) -> Any:
     payload = {"name": name, "description": description}
     return _post("/project/create", json=payload, timeout=timeout)
 
-def get_project(project_id: str, timeout: int = 30) -> Dict[str, Any]:
+def get_project(project_id: str, timeout: int = 50) -> Dict[str, Any]:
     """
     GET /project.one?projectId=<project_id>
     Returns the project dict (applications, postgres, etc) or raises DokployError.
@@ -163,7 +162,7 @@ def get_project(project_id: str, timeout: int = 30) -> Dict[str, Any]:
 
 
 # ----------------------- Aplications Services -----------------------------
-def create_application(project_id: str, name: str, description: str, timeout: int = 40) -> Dict[str, Any]:
+def create_application(project_id: str, name: str, description: str, timeout: int = 50) -> Dict[str, Any]:
     """
     POST /application.create/ -> returns response dict (may contain applicationId or id)
     """
@@ -287,6 +286,31 @@ def delete_domain(domain_id: str, timeout: int = 30):
     payload = {"domainId": domain_id}
     return _post("/domain.delete", json=payload, timeout=timeout)
 
+
+def health_check(full_url: str, timeout: int = 15) -> bool:
+    """
+    Perform a simple GET to a service health endpoint.
+    - full_url: a full URL or a host/path like "subdomain-backend.example.com/healthz".
+      If it doesn't start with http/https, https:// will be prepended.
+    - timeout: request timeout in seconds
+    Returns True if the endpoint returns HTTP 2xx, False if non-2xx.
+    Raises DokployError for network/request exceptions (so callers can decide retry vs fail).
+    """
+    if not full_url:
+        raise DokployError("health_check: empty url")
+
+    url = full_url.strip()
+    if not url.lower().startswith("http://") and not url.lower().startswith("https://"):
+        url = "https://" + url.lstrip("/")
+
+    try:
+        r = requests.get(url, timeout=timeout)
+    except RequestException as e:
+        # network level failure (DNS / connect / timeout) -> raise so caller can treat as transient
+        raise DokployError(f"health_check request failed for {url}: {e}") from e
+
+    # Return boolean for 2xx vs non-2xx. Caller can decide how to retry/backoff.
+    return 200 <= r.status_code < 300
 
 
 

@@ -1,7 +1,7 @@
 # views.py (updated)
 import re
 import logging
-
+from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
@@ -13,18 +13,17 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
 from django.db import transaction, IntegrityError
-import traceback
-import copy
+import traceback, copy
 from django.contrib.auth import get_user_model
-
+from rest_framework.views import APIView
 from .models import (
-    ProjectTemplate, IntegrationSecret, ServiceTemplate,
+    ProjectTemplate, ServiceTemplate,
     Tenant, TenantService, Deployment, DeploymentStep,
     JobRecord, AuditEntry
 )
 
 from .serializers import (
-    ProjectTemplateSerializer, IntegrationSecretSerializer,
+    ProjectTemplateSerializer, 
     ServiceTemplateSerializer, ServiceTemplateDetailSerializer,
     TenantSerializer, TenantDetailSerializer, TenantCreateSerializer,
     TenantServiceSerializer, TenantServiceDetailSerializer, TenantServiceUpdateSerializer,
@@ -58,6 +57,113 @@ def sanitize_subdomain(value: str) -> str:
     s = s.strip("-")
     return s[:63]
 
+class DashboardOverviewAPIView(APIView):
+    """
+    Returns dashboard overview data:
+      - total_projects
+      - running_tenants
+      - stopped_tenants
+      - failed_deployments (last 30 days)
+      - recent_deployments (list)
+    """
+    permission_classes = [IsAuthenticated]
+
+    # Number of recent deployments to return
+    RECENT_LIMIT = 10
+
+    def get(self, request, *args, **kwargs):
+        now = timezone.now()
+        thirty_days_ago = now - timedelta(days=30)
+
+        # Response scaffold
+        resp = {
+            "total_projects": 0,
+            "total_tenants": 0,
+            "running_tenants": 0,
+            "stopped_tenants": 0,
+            "failed_deployments": 0,
+            "recent_deployments": [],
+        }
+        warnings = []
+
+        # ---------- total projects ----------
+        try:
+            resp["total_projects"] = ProjectTemplate.objects.filter(active=True).count()
+        except Exception:
+            logger.exception("Failed to compute total_projects for dashboard")
+            warnings.append("Failed to compute total_projects")
+
+        # ---------- tenant stats (based on Tenant.status) ----------
+        try:
+            tenants_qs = Tenant.objects.filter(project__isnull=False)  # restrict to tenants with a project
+            resp["running_tenants"] = tenants_qs.filter(status="running").count()
+            resp["total_tenants"] = tenants_qs.count()
+            # stopped = failed + completed (adjust if you want different mapping)
+            resp["stopped_tenants"] = tenants_qs.filter(status__in=["failed", "completed"]).count()
+        except Exception:
+            logger.exception("Failed to compute tenant stats for dashboard")
+            warnings.append("Failed to compute tenant stats")
+
+        # ---------- failed deployments in last 30 days ----------
+        try:
+            resp["failed_deployments"] = Deployment.objects.filter(
+                status="failed",
+                created_at__gte=thirty_days_ago,
+            ).count()
+        except Exception:
+            logger.exception("Failed to compute failed_deployments for dashboard")
+            warnings.append("Failed to compute failed_deployments")
+
+        # ---------- recent deployments (most recent RECENT_LIMIT) ----------
+        try:
+            # fetch recent deployments with related tenant & project to avoid N+1
+            recent_qs = Deployment.objects.select_related("tenant", "tenant__project").order_by("-created_at")[: self.RECENT_LIMIT]
+
+            recent_list = []
+            for dep in recent_qs:
+                # deployment.meta is a JSONField - try to get branch/commit from there if present
+                meta = dep.meta if isinstance(dep.meta, dict) else {}
+                branch = meta.get("branch") or meta.get("repo_branch") or None
+                commit = meta.get("commit") or meta.get("commit_message") or meta.get("sha") or None
+
+                # use ended_at -> started_at -> created_at for displayed timestamp
+                deployed_at = dep.ended_at or dep.started_at or dep.created_at
+
+                # project name and tenant subdomain; fallback defensively
+                proj_name = None
+                tenant_subdomain = None
+                try:
+                    if dep.tenant:
+                        tenant_subdomain = getattr(dep.tenant, "subdomain", None) or getattr(dep.tenant, "name", None)
+                        proj_name = getattr(dep.tenant, "project").name if getattr(dep.tenant, "project", None) else None
+                except Exception:
+                    # keep None, but log minimally
+                    logger.debug("Failed to read tenant/project values for deployment id=%s", getattr(dep, "id", None))
+
+                recent_list.append(
+                    {
+                        "id": dep.id,
+                        "project_name": proj_name or (meta.get("project_name") or "Unknown Project"),
+                        "tenant_subdomain": tenant_subdomain or (meta.get("tenant") or meta.get("instance") or "unknown"),
+                        "status": dep.status,
+                        "branch": branch,
+                        "commit": commit,
+                        "deployed_at": deployed_at,
+                        "trigger_reason": dep.trigger_reason,
+                        "duration_seconds": dep.duration_seconds,
+                    }
+                )
+
+            resp["recent_deployments"] = recent_list
+        except Exception:
+            logger.exception("Failed to build recent_deployments for dashboard")
+            warnings.append("Failed to build recent_deployments")
+
+        # Attach warnings if any (non-fatal)
+        if warnings:
+            resp["_warnings"] = warnings
+
+        return Response(resp, status=status.HTTP_200_OK)
 
 class ProjectTemplateViewSet(viewsets.ModelViewSet):
     queryset = ProjectTemplate.objects.filter(active=True)
@@ -342,9 +448,8 @@ class TenantViewSet(viewsets.ModelViewSet):
                 triggered_by=self.request.user,
                 trigger_reason='initial',
                 status='pending'
-            )
-            self._create_deployment_steps(deployment=deployment, tenant=tenant)
-            
+            )    
+            self._create_deployment_steps(deployment=deployment, tenant=tenant)        
             # Schedule the deployment job
             try:
                 job_id = f"deployment_{deployment.id}"
@@ -362,6 +467,8 @@ class TenantViewSet(viewsets.ModelViewSet):
                 deployment.meta = deployment.meta or {}
                 deployment.meta['scheduler_job_id'] = job_id
                 deployment.save(update_fields=['meta'])
+
+
             except Exception as e:
                 # Scheduling failed; log and leave deployment in pending so it can be resumed later
                 logger.exception("Failed to schedule deployment %s for tenant %s: %s", deployment.id, tenant.id, e)
@@ -374,64 +481,57 @@ class TenantViewSet(viewsets.ModelViewSet):
         response_data['deployment_id'] = deployment.id
         
         return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
-            
+    
     def _create_deployment_steps(self, deployment: Deployment, tenant: Tenant):
+
         steps_data = []
         order = 1
-        print("\n Creating Steps Project\n")
-        # Project creation
+
+        # 1. Project creation
         steps_data.append({
             'deployment': deployment,
-            'step_key': 'project.create',
+            'step_key': 'project-create',
             'order': order,
             'status': 'pending'
         })
         order += 1
 
-        # Service creation/configuration steps (generic step keys)
-        for service in tenant.services.all():
+        # Backend related steps (if a backend service exists)
+        backend_ts = tenant.services.filter(service_type='backend').first()
+        if backend_ts:
+            # 2. Backend Creation
             steps_data.append({
                 'deployment': deployment,
-                'tenant_service': service,
-                'step_key': 'service.create',
+                'tenant_service': backend_ts,
+                'step_key': 'backend-create',
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+            # 3. Backend Git Attach
+            steps_data.append({
+                'deployment': deployment,
+                'tenant_service': backend_ts,
+                'step_key': 'backend-git-attach',
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+            # 4. Backend Build Config
+            steps_data.append({
+                'deployment': deployment,
+                'tenant_service': backend_ts,
+                'step_key': 'backend-build-config',
                 'order': order,
                 'status': 'pending'
             })
             order += 1
 
-            steps_data.append({
-                'deployment': deployment,
-                'tenant_service': service,
-                'step_key': 'service.git_attach',
-                'order': order,
-                'status': 'pending'
-            })
-            order += 1
-
-            steps_data.append({
-                'deployment': deployment,
-                'tenant_service': service,
-                'step_key': 'service.build_config',
-                'order': order,
-                'status': 'pending'
-            })
-            order += 1
-
-            if service.service_type == 'backend':
-                steps_data.append({
-                    'deployment': deployment,
-                    'tenant_service': service,
-                    'step_key': 'service.env_set',
-                    'order': order,
-                    'status': 'pending'
-                })
-                order += 1
-
-        # DB steps (if project requires DB)
+        # 5-6. DB create + db deploy if required by template
         if tenant.project.db_required:
             steps_data.append({
                 'deployment': deployment,
-                'step_key': 'db.create',
+                'step_key': 'db-create',
                 'order': order,
                 'status': 'pending'
             })
@@ -439,18 +539,82 @@ class TenantViewSet(viewsets.ModelViewSet):
 
             steps_data.append({
                 'deployment': deployment,
-                'step_key': 'db.deploy',
+                'step_key': 'db-deploy',
                 'order': order,
                 'status': 'pending'
             })
             order += 1
 
-        # Service deploy steps
-        for service in tenant.services.all():
+        # Frontend related steps (if a frontend service exists)
+        frontend_ts = tenant.services.filter(service_type='frontend').first()
+        if frontend_ts:
+            # 7. Frontend Creation
             steps_data.append({
                 'deployment': deployment,
-                'tenant_service': service,
-                'step_key': 'service.deploy',
+                'tenant_service': frontend_ts,
+                'step_key': 'frontend-create',
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+            # 8. Frontend Git Attach
+            steps_data.append({
+                'deployment': deployment,
+                'tenant_service': frontend_ts,
+                'step_key': 'frontend-git-attach',
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+            # 9. Frontend Build Config
+            steps_data.append({
+                'deployment': deployment,
+                'tenant_service': frontend_ts,
+                'step_key': 'frontend-build-config',
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+
+        # 10. Backend domain creation (if backend exists)
+        if backend_ts:
+            steps_data.append({
+                'deployment': deployment,
+                'tenant_service': backend_ts,
+                'step_key': 'backend-domains-create',
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+
+        # 11. Frontend domain creation (if frontend exists)
+        if frontend_ts:
+            steps_data.append({
+                'deployment': deployment,
+                'tenant_service': frontend_ts,
+                'step_key': 'frontend-domains-create',
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+
+        # 12. Backend environment setup (if backend exists)
+        if backend_ts:
+            steps_data.append({
+                'deployment': deployment,
+                'tenant_service': backend_ts,
+                'step_key': 'backend-service-env-set',
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+
+        # 13-14. Backend deploy + wait
+        if backend_ts:
+            steps_data.append({
+                'deployment': deployment,
+                'tenant_service': backend_ts,
+                'step_key': 'backend-deploy',
                 'order': order,
                 'status': 'pending'
             })
@@ -458,61 +622,73 @@ class TenantViewSet(viewsets.ModelViewSet):
 
             steps_data.append({
                 'deployment': deployment,
-                'tenant_service': service,
-                'step_key': 'service.wait_deploy',
+                'tenant_service': backend_ts,
+                'step_key': 'service-wait-deploy',
                 'order': order,
                 'status': 'pending'
             })
             order += 1
 
-        # Domain creation and propagation
+        # 15-16. Frontend deploy + wait
+        if frontend_ts:
+            steps_data.append({
+                'deployment': deployment,
+                'tenant_service': frontend_ts,
+                'step_key': 'frontend-deploy',   # CORRECT KEY
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+
+            steps_data.append({
+                'deployment': deployment,
+                'tenant_service': frontend_ts,
+                'step_key': 'service-wait-deploy',
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+
+        # 17. Domains wait propagation
         steps_data.append({
             'deployment': deployment,
-            'step_key': 'domains.create',
+            'step_key': 'domains-wait-propagation',
             'order': order,
             'status': 'pending'
         })
         order += 1
 
-        steps_data.append({
-            'deployment': deployment,
-            'step_key': 'domains.wait_propagation',
-            'order': order,
-            'status': 'pending'
-        })
-        order += 1
-
-        # Health checks
-        for service in tenant.services.all():
+        # 18. Health check
+        if backend_ts:
             steps_data.append({
                 'deployment': deployment,
-                'tenant_service': service,
-                'step_key': 'health.check',
+                'step_key': 'health-check',
                 'order': order,
                 'status': 'pending'
             })
             order += 1
 
-        # Internal provision
+            # 19. Internal provisioning / create superuser
+            steps_data.append({
+                'deployment': deployment,
+                'step_key': 'create-superuser',
+                'order': order,
+                'status': 'pending'
+            })
+            order += 1
+
+        # 20. Notification email (last)
         steps_data.append({
             'deployment': deployment,
-            'step_key': 'internal.provision',
+            'step_key': 'email-notify-success',
             'order': order,
             'status': 'pending'
         })
         order += 1
 
-        # Notification (last)
-        steps_data.append({
-            'deployment': deployment,
-            'step_key': 'email.notify_success',
-            'order': order,
-            'status': 'pending'
-        })
-
-        # Persist steps
-        for step_data in steps_data:
-            DeploymentStep.objects.create(**step_data)
+        # Persist steps - consider DeploymentStep.objects.bulk_create([...]) for speed
+        for step_info in steps_data:
+            DeploymentStep.objects.create(**step_info)
 
     @action(detail=True, methods=['post'])
     def redeploy(self, request, pk=None):
@@ -593,7 +769,8 @@ class DeploymentViewSet(viewsets.ModelViewSet):
 
         # update status to pending/running based on your convention
         deployment.status = "pending"
-        deployment.save(update_fields=["status", "updated_at"])
+        deployment.trigger_reason = 'resume'
+        deployment.save(update_fields=["status", 'trigger_reason', "updated_at"])
 
         return Response({"detail": "Resume scheduled", "job_id": job_id}, status=status.HTTP_202_ACCEPTED)
     
@@ -621,10 +798,20 @@ class DeploymentViewSet(viewsets.ModelViewSet):
         Useful for UI to show what happened and which steps completed.
         """
         deployment = self.get_object()
-        meta = deployment.meta or {}
-        logs = meta.get('logs', [])
+        steps = deployment.steps
+        steps_serialzer = DeploymentStepSerializer(steps, many=True)
+        data = {
+            "id": deployment.id,
+            "status": deployment.status,
+            "trigger_reason": deployment.trigger_reason,
+            "started_at": deployment.started_at,
+            "duration_seconds": deployment.duration_seconds,
+            "tenant_id": deployment.tenant.id,
+            "logs": deployment.meta['logs'],
+            'steps': steps_serialzer.data
+        }
         # Optionally you may want to limit how many logs are returned; for now return all
-        return Response({"deployment_id": deployment.id, "logs": logs})
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class DeploymentStepViewSet(viewsets.ModelViewSet):

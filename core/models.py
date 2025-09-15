@@ -2,31 +2,10 @@
 from django.db import models
 from django.core.validators import MinLengthValidator
 from django.utils import timezone
-from encrypted_model_fields.fields import EncryptedTextField
 from django.conf import settings
 
 # Create your models here.
 User = settings.AUTH_USER_MODEL
-
-class IntegrationSecret(models.Model):
-    SECRET_TYPE_CHOICES = [
-        ('internal_provision_token', 'Internal Provision Token'),
-        ('dokploy_api', 'Dokploy API Key'),
-        ('other', 'Other'),
-    ]
-    
-    name = models.CharField(max_length=100)
-    secret_type = models.CharField(max_length=30, choices=SECRET_TYPE_CHOICES)
-    encrypted_value = EncryptedTextField()
-    project = models.ForeignKey("ProjectTemplate", related_name='secrets', on_delete=models.CASCADE, null=True, blank=True)
-    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
-    created_at = models.DateTimeField(default=timezone.now)
-    updated_at = models.DateTimeField(auto_now=True)
-    last_rotated_at = models.DateTimeField(null=True, blank=True)
-
-    def __str__(self):
-        return f"{self.name} ({self.secret_type})"
-
 
 class ProjectTemplate(models.Model):
     DB_TYPE_CHOICES = [
@@ -198,22 +177,26 @@ class Deployment(models.Model):
 
 class DeploymentStep(models.Model):
     STEP_KEY_CHOICES = [
-        ('project.create', 'Project Creation'),
-        ('service.create', 'Service Creation'),
-        ('service.git_attach', 'Git Attachment'),
-        ('service.build_config', 'Build Configuration'),
-        ('service.env_set', 'Environment Setup'),
-        ('db.create', 'Database Creation'),
-        ('db.deploy', 'Database Deployment'),
-        ('service.deploy', 'Service Deployment'),
-        ('service.wait_deploy', 'Wait for Deployment'),
-        ('domains.create', 'Domain Creation'),
-        ('domains.wait_propagation', 'Domain Propagation'),
-        ('health.check', 'Health Check'),
-        ('health.retry', 'Health Retry'),
-        ('internal.provision', 'Internal Provisioning'),
-        ('email.notify_success', 'Success Notification'),
-        ('email.notify_failure', 'Failure Notification'),
+        ('project-create', 'Project Creation'),
+        ('backend-create', 'Backend Creation'),
+        ('backend-git-attach', 'Backend Git Attachment'),
+        ('backend-build-config', 'Backend Build Configuration'),
+        ('frontend-create', 'Frontend Creation'),
+        ('frontend-git-attach', 'Frontend Git Attachment'),
+        ('frontend-build-config', 'Frontend Build Configuration'),
+        ('backend-service-env-set', 'Backend Environment Setup'),
+        ('db-create', 'Database Creation'),
+        ('db-deploy', 'Database Deployment'),
+        ('backend-deploy', 'Backend Deployment'),
+        ('frontend-deploy', 'Frontend Deployment'),
+        ('service-wait-deploy', 'Wait for Deployment'),
+        ('backend-domains-create', 'Backend Domain Creation'),
+        ('frontend-domains-create', 'Frontend Domain Creation'),
+        ('domains-wait-propagation', 'Wait for Domains Propagation'),
+        ('health-check', 'Health Check'),
+        ('health-retry', 'Health Retry'),
+        ('create-superuser', 'Create Superuser'),
+        ('email-notify-success', 'Send Email Notification'),
     ]
     
     STATUS_CHOICES = [

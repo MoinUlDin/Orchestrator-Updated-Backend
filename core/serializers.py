@@ -1,7 +1,7 @@
 # core.serializers.py
 from rest_framework import serializers
 from .models import (
-    ProjectTemplate, IntegrationSecret, ServiceTemplate, 
+    ProjectTemplate, ServiceTemplate, 
     Tenant, TenantService, Deployment, DeploymentStep, 
     JobRecord, AuditEntry
 )
@@ -20,15 +20,6 @@ class UserSerializer(serializers.ModelSerializer):
 class ProjectTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProjectTemplate
-        fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
-
-class IntegrationSecretSerializer(serializers.ModelSerializer):
-    # Make encrypted_value write-only for security
-    encrypted_value = serializers.CharField(write_only=True)
-    
-    class Meta:
-        model = IntegrationSecret
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
 

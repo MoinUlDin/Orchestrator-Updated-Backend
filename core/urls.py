@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
 
+
 router = DefaultRouter()
 router.register(r'project-templates', views.ProjectTemplateViewSet)
 router.register(r'service-templates', views.ServiceTemplateViewSet)
@@ -17,4 +18,5 @@ router.register(r'notifications', views.NotificationViewSet, basename='notificat
 
 urlpatterns = [
     path('', include(router.urls)),
+    path("dashboard/overview/", views.DashboardOverviewAPIView.as_view(), name="dashboard-overview"),
 ]
