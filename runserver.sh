@@ -23,7 +23,7 @@ WSGI_MODULE="${DJANGO_WSGI:-orchestrator.wsgi:application}"
 
 echo "Starting Gunicorn with WSGI: $WSGI_MODULE"
 exec gunicorn "$WSGI_MODULE" \
-  --bind 0.0.0.0:8000 \
+  --bind 0.0.0.0:80 \
   --workers 3 \
   --timeout 120 \
   --log-level info \
