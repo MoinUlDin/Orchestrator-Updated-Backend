@@ -14,11 +14,14 @@ djangorestframework==3.16.1
 djangorestframework_simplejwt==5.5.1
 dotenv==0.9.9
 drf-spectacular==0.28.0
+gunicorn==23.0.0
 idna==3.10
 inflection==0.5.1
 jsonschema==4.25.1
 jsonschema-specifications==2025.9.1
+packaging==25.0
 pillow==11.3.0
+psycopg2-binary==2.9.10
 pycparser==2.23
 PyJWT==2.10.1
 python-dotenv==1.1.1
@@ -32,3 +35,4 @@ tzdata==2025.2
 tzlocal==5.3.1
 uritemplate==4.2.0
 urllib3==2.5.0
+whitenoise==6.11.0

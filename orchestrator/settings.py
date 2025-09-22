@@ -15,14 +15,15 @@ if not SECRET_KEY and not DEBUG or SECRET_KEY=='NOT_secure_use_only_Local_TEstin
     raise Exception("Missing DJANGO_SECRET_KEY for production")
 
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+
 CORS_ALLOWED_ORIGINS = [
-    "https://abc.schoolcare.pk",
+    "https://orchestrator-backend.thevista365.com",
+    "https://orchestrator.thevista365.com",
 ]
 
 
-FIELD_ENCRYPTION_KEY = 'tg93UNJdqF9ZOmNmWlHXBQavakvYX2gqEVEnDXFIEvs='
+FIELD_ENCRYPTION_KEY = os.getenv("FIELD_ENCRYPTION_KEY", "")
 
-DEBUG = True
 
 ALLOWED_HOSTS = []
 
@@ -77,10 +78,7 @@ TEMPLATES = [
         },
     },
 ]
-CORS_ALLOWED_ORIGINS = [
-    "https://orchestrator-backend.thevista365.com",
-    "https://orchestrator.thevista365.com",
-]
+
 # or for dev quickly:
 # CORS_ALLOW_ALL_ORIGINS = True
 
@@ -90,7 +88,7 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 WSGI_APPLICATION = 'orchestrator.wsgi.application'
 
-AUTH_USER_MODEL = 'accounts.User'   # app name 'auth', model 'User'
+AUTH_USER_MODEL = 'accounts.User'
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
@@ -119,10 +117,23 @@ SIMPLE_JWT = {
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
+# DB for development
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',
+#     }
+# }
+
+# DB will be used in Production
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ.get("DB_NAME"),
+        "USER": os.environ.get("DB_USER"),
+        "PASSWORD": os.environ.get("DB_PASSWORD"),
+        "HOST": os.environ.get("DB_HOST"),
+        "PORT": os.environ.get("DB_PORT", "5432"),
     }
 }
 
