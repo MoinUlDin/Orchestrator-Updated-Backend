@@ -78,8 +78,8 @@ TEMPLATES = [
     },
 ]
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:5173"
+    "https://orchestrator-backend.thevista365.com",
+    "https://orchestrator.thevista365.com",
 ]
 # or for dev quickly:
 # CORS_ALLOW_ALL_ORIGINS = True
@@ -111,8 +111,8 @@ SPECTACULAR_SETTINGS = {
 }
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(days=7),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
+    "ACCESS_TOKEN_LIFETIME": timedelta(hours=3),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "ROTATE_REFRESH_TOKENS": True,
 }
 

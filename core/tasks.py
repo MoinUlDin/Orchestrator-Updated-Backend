@@ -987,114 +987,192 @@ def main_deployment_function(deployment_id: int):
     print(f"\n ===== Checking Backend with {DELAY_STEP} seconds delay ====== \n")
     time.sleep(DELAY_STEP)
     backend_ts = tenant.services.filter(service_type='backend').first()
-    ok = _run_step_and_record(deployment, tenant, "backend-create", lambda d, t: _step_ensure_service_app(d, t, 'backend'), tenant_service=backend_ts)
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "backend-create",
+        lambda d, t: _step_ensure_service_app(d, t, 'backend'),
+        tenant_service=backend_ts,
+    )
     if not ok:
         logger.info("main_deployment_function: backend creation failed or incomplete; exiting for deployment=%s", deployment_id)
         return
 
     # Step 3: attach git provider (idempotent)
-    ok = _run_step_and_record(deployment, tenant, "backend-git-attach", lambda d, t: _step_set_git_provider(d, t, 'backend'), tenant_service=backend_ts)
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "backend-git-attach",
+        lambda d, t: _step_set_git_provider(d, t, 'backend'),
+        tenant_service=backend_ts,
+    )
     if not ok:
-        logger.info("main_deployment_function: git attach failed for backend; exiting for deployment=%s", deployment_id)        
+        logger.info("main_deployment_function: git attach failed for backend; exiting for deployment=%s", deployment_id)
         return
 
     # Step 4: save build config for backend
-    ok = _run_step_and_record(deployment, tenant, "backend-build-config", lambda d, t: _step_set_build_config(d, t, 'backend'), tenant_service=backend_ts)
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "backend-build-config",
+        lambda d, t: _step_set_build_config(d, t, 'backend'),
+        tenant_service=backend_ts,
+    )
     if not ok:
         logger.info("main_deployment_function: build config failed for backend; exiting for deployment=%s", deployment_id)
         return
 
     # Step 5: create DB if required (returns created_this_run, success)
     created_db, db_ok = _step_create_db(deployment, tenant)   # returns (created_now, success_final)
-    # Update the deployment step rows for db-create and db-deploy accordingly
     db_handled_ok = _handle_db_step_results(deployment, tenant, created_db, db_ok)
     if not db_handled_ok:
         logger.info("main_deployment_function: db creation/deploy incomplete/failed; exiting for deployment=%s", deployment_id)
         return
-    
 
     # Step 6: create frontend service
-    print(f'\n ===== Waiting for {DELAY_STEP} seconds before creating fronted service')
+    print(f'\n ===== Waiting for {DELAY_STEP} seconds before creating frontend service ====== \n')
     time.sleep(DELAY_STEP)
-    created_frontend, frontend_ok = _step_ensure_service_app(deployment, tenant, 'frontend')
-    if not frontend_ok:
+    frontend_ts = tenant.services.filter(service_type='frontend').first()
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "frontend-create",
+        lambda d, t: _step_ensure_service_app(d, t, 'frontend'),
+        tenant_service=frontend_ts,
+    )
+    if not ok:
         logger.info("main_deployment_function: frontend creation incomplete/failed; exiting for deployment=%s", deployment_id)
         return
-    
+
     # Step 7: set git provider for frontend
-    ok_frontend_git = _step_set_git_provider(deployment, tenant, 'frontend')
-    if not ok_frontend_git:
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "frontend-git-attach",
+        lambda d, t: _step_set_git_provider(d, t, 'frontend'),
+        tenant_service=frontend_ts,
+    )
+    if not ok:
         logger.info("main_deployment_function: git attach failed for frontend; exiting for deployment=%s", deployment_id)
         return
 
     # Step 8: set build config for frontend
-    ok_build_frontend = _step_set_build_config(deployment, tenant, 'frontend')
-    if not ok_build_frontend:
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "frontend-build-config",
+        lambda d, t: _step_set_build_config(d, t, 'frontend'),
+        tenant_service=frontend_ts,
+    )
+    if not ok:
         logger.info("main_deployment_function: build config failed for frontend; exiting for deployment=%s", deployment_id)
         return
-    
+
     time.sleep(DELAY_STEP)
-     # Step 9: create domain for backend
-    ok_backend_domain = _step_create_domain(deployment, tenant, 'backend')
-    if not ok_backend_domain:
+
+    # Step 9: create domain for backend
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "backend-domains-create",
+        lambda d, t: _step_create_domain(d, t, 'backend'),
+        tenant_service=backend_ts,
+    )
+    if not ok:
         logger.info("main_deployment_function: backend domain creation failed; exiting for deployment=%s", deployment_id)
         return
 
     # Step 10: create domain for frontend
-    ok_frontend_domain = _step_create_domain(deployment, tenant, 'frontend')
-    if not ok_frontend_domain:
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "frontend-domains-create",
+        lambda d, t: _step_create_domain(d, t, 'frontend'),
+        tenant_service=frontend_ts,
+    )
+    if not ok:
         logger.info("main_deployment_function: frontend domain creation failed; exiting for deployment=%s", deployment_id)
         return
-    
+
     # Step 11: set backend environment variables
-    ok_backend_env = _step_set_backend_env(deployment, tenant)
-    if not ok_backend_env:
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "backend-service-env-set",
+        _step_set_backend_env,
+        tenant_service=backend_ts,
+    )
+    if not ok:
         logger.info("main_deployment_function: backend env setup failed; exiting for deployment=%s", deployment_id)
         return
-    
-    deployment_delay = 180
+
     # Step 12: deploy backend service
+    deployment_delay = 180
     print('\n Going to trigger Backend service if exists\n')
-    ok_backend_deploy = _step_deploy_service(deployment, tenant, 'backend')
-    if not ok_backend_deploy:
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "backend-deploy",
+        lambda d, t: _step_deploy_service(d, t, 'backend'),
+        tenant_service=backend_ts,
+    )
+    if not ok:
         logger.info("main_deployment_function: backend deployment failed; exiting for deployment=%s", deployment_id)
         return
-    
+
     # wait 3 minutes before frontend deploy
     logger.info(f"Sleeping {deployment_delay/60} minutes before deploying frontend...")
-    _append_log(deployment, f"Sleeping for  {deployment_delay/60} minutes before deploying frontend...")
+    _append_log(deployment, f"Sleeping for {deployment_delay/60} minutes before deploying frontend...")
     print(f"Sleeping {deployment_delay/60} minutes before deploying frontend...")
     time.sleep(deployment_delay)
 
     # Step 13: deploy frontend service
-    ok_frontend_deploy = _step_deploy_service(deployment, tenant, 'frontend')
-    if not ok_frontend_deploy:
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "frontend-deploy",
+        lambda d, t: _step_deploy_service(d, t, 'frontend'),
+        tenant_service=frontend_ts,
+    )
+    if not ok:
         logger.info("main_deployment_function: frontend deployment failed; exiting for deployment=%s", deployment_id)
         return
 
     frontend_delay = 120
     logger.info(f"Sleeping {frontend_delay/60} minutes after frontend deployment triggered.")
     print(f"Sleeping {frontend_delay/60} minutes after frontend deployment triggered.")
-    _append_log(deployment, f"Sleeping for  {frontend_delay/60} minutes so frontend deployment finishes")
-
+    _append_log(deployment, f"Sleeping for {frontend_delay/60} minutes so frontend deployment finishes")
     time.sleep(frontend_delay)
-    
-    
+
     # Step 14: health check (wait/retries inside helper)
-    ok_health = _step_health_check(deployment, tenant)
-    if not ok_health:
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "health-check",
+        _step_health_check,
+        tenant_service=backend_ts,
+    )
+    if not ok:
         logger.info("main_deployment_function: health check failed; exiting for deployment=%s", deployment_id)
         return
 
     # Step 15: internal provision (creates superuser / seeds etc.)
-    ok_internal = _step_internal_provision(deployment, tenant)
-    if not ok_internal:
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "create-superuser",
+        _step_internal_provision,
+        tenant_service=backend_ts,
+    )
+    if not ok:
         logger.info("main_deployment_function: internal provision failed; exiting for deployment=%s", deployment_id)
         return
-    
+
+    # Final: mark notification step success (we don't send email here)
+    _run_step_and_record(deployment, tenant, "email-notify-success", lambda d, t: True)
+
     # IMPORTANT: do not set deployment.status to 'succeeded' here.
     logger.info("main_deployment_function finished checks for deployment=%s", deployment_id)
     print("\n +++++ All given tasks completed (project/backend/git) +++++ \n")
     return
-
 
