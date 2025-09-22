@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# go to project root (adjust if your Docker WORKDIR differs)
+# If script is in project root, cd there; otherwise adjust as needed.
 cd "$(dirname "$0")"
 
 echo "Collect static files..."
@@ -14,9 +14,11 @@ echo "Apply migrations"
 python manage.py migrate
 
 echo "Start APScheduler in background"
+# Optional: export RUNNING_EXTERNAL_SCHEDULER=1 if your AppConfig.ready() checks it
+export RUNNING_EXTERNAL_SCHEDULER=1
 python manage.py runapscheduler &
 
-# Use your project's WSGI module here (replace 'orchestrator' with your project package if different)
+# Use DJANGO_WSGI env var if provided, else default to orchestrator.wsgi:application
 WSGI_MODULE="${DJANGO_WSGI:-orchestrator.wsgi:application}"
 
 echo "Starting Gunicorn with WSGI: $WSGI_MODULE"
