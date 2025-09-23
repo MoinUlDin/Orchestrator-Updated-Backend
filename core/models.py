@@ -3,6 +3,11 @@ from django.db import models
 from django.core.validators import MinLengthValidator
 from django.utils import timezone
 from django.conf import settings
+from django.db import models
+from django.utils import timezone
+from django.conf import settings
+from django.contrib.postgres.fields import JSONField  # optional fallback if using old Django/Postgres
+from django.core.serializers.json import DjangoJSONEncoder
 
 # Create your models here.
 User = settings.AUTH_USER_MODEL
@@ -189,7 +194,8 @@ class DeploymentStep(models.Model):
         ('db-deploy', 'Database Deployment'),
         ('backend-deploy', 'Backend Deployment'),
         ('frontend-deploy', 'Frontend Deployment'),
-        ('service-wait-deploy', 'Wait for Deployment'),
+        ('backend-wait-deploy', 'Wait for Backend Deployment Completion'),
+        ('frontend-wait-deploy', 'Wait for Frontend Deployment Completion'),
         ('backend-domains-create', 'Backend Domain Creation'),
         ('frontend-domains-create', 'Frontend Domain Creation'),
         ('domains-wait-propagation', 'Wait for Domains Propagation'),
@@ -275,3 +281,133 @@ class AuditEntry(models.Model):
 
     def __str__(self):
         return f"{self.user} - {self.action} - {self.model_name} - {self.created_at}"
+
+
+
+class QueuedJob(models.Model):
+    """
+    DB-backed queued job (handoff from web/processes -> single scheduler process).
+    The scheduler process will poll for jobs with status='pending' and next_run_at <= now()
+    and then schedule them into APScheduler (or run them directly).
+    """
+
+    STATUS_PENDING = "pending"    # created, not yet scheduled/executed
+    STATUS_SCHEDULED = "scheduled"  # persisted to apscheduler (job_id set)
+    STATUS_RUNNING = "running"    # currently executing
+    STATUS_SUCCEEDED = "succeeded"  # finished ok
+    STATUS_FAILED = "failed"      # finished with error
+    STATUS_CANCELLED = "cancelled"
+
+    STATUS_CHOICES = (
+        (STATUS_PENDING, "Pending"),
+        (STATUS_SCHEDULED, "Scheduled"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_SUCCEEDED, "Succeeded"),
+        (STATUS_FAILED, "Failed"),
+        (STATUS_CANCELLED, "Cancelled"),
+    )
+
+    # Basic metadata
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="queued_jobs")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # task information
+    task_name = models.CharField(max_length=255, db_index=True)
+    # Args and kwargs stored as JSON. Use Django's JSONField (Postgres / modern Django)
+    args = models.JSONField(default=list, encoder=DjangoJSONEncoder)   # list
+    kwargs = models.JSONField(default=dict, encoder=DjangoJSONEncoder)  # dict
+
+    # scheduling / execution
+    next_run_at = models.DateTimeField(null=True, blank=True, db_index=True)  # when to run
+    priority = models.IntegerField(default=100, help_text="Lower numbers run earlier", db_index=True)
+
+    # lifecycle
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    attempts = models.IntegerField(default=0)
+    max_attempts = models.IntegerField(default=3)
+
+    # if we create a job in APScheduler we can store that id here
+    aps_job_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+
+    # result / error
+    result = models.JSONField(null=True, blank=True, encoder=DjangoJSONEncoder)
+    last_error = models.TextField(null=True, blank=True)
+
+    # runtime timestamps
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["status", "next_run_at", "priority"]),
+        ]
+        ordering = ["priority", "next_run_at", "created_at"]
+
+    def __str__(self):
+        return f"QueuedJob(id={self.pk}, task={self.task_name}, status={self.status})"
+
+    # --------------------------
+    # Helper / convenience APIs
+    # --------------------------
+    @classmethod
+    def enqueue(
+        cls,
+        task_name: str,
+        args: list | None = None,
+        kwargs: dict | None = None,
+        created_by: User = None,
+        company=None,
+        next_run_at: timezone.datetime | None = None,
+        priority: int = 100,
+        max_attempts: int = 3,
+    ) -> "QueuedJob":
+        """
+        Create and return a QueuedJob in status 'pending'.
+        Use this in your views to hand off work to the scheduler process.
+        """
+        job = cls.objects.create(
+            task_name=task_name,
+            args=args or [],
+            kwargs=kwargs or {},
+            created_by=created_by,
+            next_run_at=next_run_at or timezone.now(),
+            priority=priority,
+            max_attempts=max_attempts,
+            status=cls.STATUS_PENDING,
+        )
+        return job
+
+    def mark_scheduled(self, aps_job_id: str | None = None):
+        self.status = self.STATUS_SCHEDULED
+        if aps_job_id:
+            self.aps_job_id = aps_job_id
+        self.save(update_fields=["status", "aps_job_id"])
+
+    def mark_running(self):
+        self.status = self.STATUS_RUNNING
+        self.started_at = timezone.now()
+        self.attempts = (self.attempts or 0) + 1
+        self.save(update_fields=["status", "started_at", "attempts"])
+
+    def mark_succeeded(self, result=None):
+        self.status = self.STATUS_SUCCEEDED
+        self.result = result
+        self.finished_at = timezone.now()
+        self.save(update_fields=["status", "result", "finished_at"])
+
+    def mark_failed(self, error_text: str = "", allow_retry: bool = True):
+        self.last_error = (self.last_error or "") + f"\n[{timezone.now().isoformat()}] {error_text}"
+        self.finished_at = timezone.now()
+        if allow_retry and (self.attempts or 0) < (self.max_attempts or 0):
+            # reschedule based on an exponential or fixed backoff; here simple 30s * attempts
+            backoff_seconds = 30 * max(1, (self.attempts or 1))
+            self.next_run_at = timezone.now() + timezone.timedelta(seconds=backoff_seconds)
+            self.status = self.STATUS_PENDING
+            self.save(update_fields=["last_error", "finished_at", "next_run_at", "status"])
+        else:
+            self.status = self.STATUS_FAILED
+            self.save(update_fields=["last_error", "finished_at", "status"])
+
+    def cancel(self):
+        self.status = self.STATUS_CANCELLED
+        self.save(update_fields=["status"])

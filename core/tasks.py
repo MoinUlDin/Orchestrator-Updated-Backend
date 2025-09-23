@@ -98,6 +98,7 @@ def _run_step_and_record(deployment: Deployment, tenant: Tenant, step_key: str, 
     Returns True on success (or when step is intentionally skipped); False on failure.
     """
     # find the step row
+    print(f"\n Got step Key: {step_key} \n")
     step_row = _find_step(deployment, step_key, tenant_service)
     if not step_row:
         # not present in the desired steps for this deployment -> skip
@@ -239,7 +240,7 @@ def _step_ensure_project(deployment: Deployment, tenant: Tenant) -> bool:
         _append_log(
             deployment,
             "project.create skipped - dokploy_project_id already present",
-            {"project_id": deployment.meta.get("dokploy_project_id")},
+            {"project_id": deployment.meta.get("dokploy_project_id")}, type="success"
         )
         print("\n ===== project.create skipped - dokploy_project_id already present ====== \n")
         return True
@@ -859,7 +860,9 @@ def _step_health_check(deployment: Deployment, tenant: Tenant) -> bool:
         healthy = False
         while attempt < HEALTH_MAX_ATTEMPTS:
             attempt += 1
+            
             try:
+                print(f'sending request to: "{url}"')
                 ok = health_check(url, timeout=INTERNAL_PROVISION_TIMEOUT)
             except DokployError as e:
                 # network-level error — treat as transient and retry (with backoff)
@@ -869,7 +872,7 @@ def _step_health_check(deployment: Deployment, tenant: Tenant) -> bool:
                 _append_log(deployment, f"health.check attempt {attempt} failed for {ts.name}; waiting {wait}s before retry")
                 time.sleep(wait)
                 continue
-
+            print(f'ok: {ok}')
             if ok:
                 healthy = True
                 ts.health_status = "ok"
@@ -881,7 +884,7 @@ def _step_health_check(deployment: Deployment, tenant: Tenant) -> bool:
                 ts.health_status = "unhealthy"
                 ts.save(update_fields=["health_status", "updated_at"])
                 wait = HEALTH_BASE_WAIT * (2 ** (attempt - 1))
-                _append_log(deployment, f"health.check attempt {attempt} returned non-2xx for {ts.name}; waiting {wait}s before retry")
+                _append_log(deployment, f"health.check attempt {attempt} returned non-2xx for {ts.name}; waiting {wait}s before retry", type="error")
                 time.sleep(wait)
 
         if not healthy:
@@ -894,7 +897,7 @@ def _step_health_check(deployment: Deployment, tenant: Tenant) -> bool:
     deployment.meta = deployment.meta or {}
     deployment.meta["health_ok"] = True
     deployment.save(update_fields=["meta", "updated_at"])
-    _append_log(deployment, "Health check succeeded for all backend services")
+    _append_log(deployment, "Health check succeeded for all backend services" , type="success")
     return True
 
 # -------------------------
@@ -907,7 +910,7 @@ def _step_internal_provision(deployment: Deployment, tenant: Tenant) -> bool:
     Returns True on success (or skipped), False on failure.
     """
     if (deployment.meta or {}).get("internal_provision_done"):
-        _append_log(deployment, "Internal provision skipped — already done", {"internal_provision_done": True})
+        _append_log(deployment, "Internal provision skipped — already done", {"internal_provision_done": True} , type="success")
         return True
 
     admin_email = (deployment.meta or {}).get("admin_email") or (tenant.created_by.email if tenant.created_by else None)
@@ -938,7 +941,7 @@ def _step_internal_provision(deployment: Deployment, tenant: Tenant) -> bool:
             r = requests.post(url, json={"admin_email": admin_email, "admin_password": admin_password}, headers=headers, timeout=INTERNAL_PROVISION_TIMEOUT)
             if 200 <= r.status_code < 300:
                 ok_any = True
-                _append_log(deployment, f"Internal provision succeeded for {ts.name}", {"status_code": r.status_code})
+                _append_log(deployment, f"Internal provision succeeded for {ts.name}", {"status_code": r.status_code}, type="success")
             else:
                 errors.append(f"{ts.name}:{r.status_code}:{r.text}")
                 _append_log(deployment, f"Internal provision returned non-2xx for {ts.name}", {"status_code": r.status_code}, type="error")
@@ -957,6 +960,33 @@ def _step_internal_provision(deployment: Deployment, tenant: Tenant) -> bool:
     _append_log(deployment, "Internal provision step completed", {"ok_any": ok_any})
     return True
 
+# -------------------------
+# step: waiting for deployment
+# -------------------------
+def _step_waiting_for_service(deployment: Deployment, tenant: Tenant, serv_type) -> bool:
+
+    deployment_delay = 140
+    frontend_delay = 120
+    domain_delay = 600
+    if (serv_type == 'backend'):
+        logger.info(f"Sleeping {deployment_delay/60} minutes before deploying frontend...")
+        _append_log(deployment, f"Sleeping for {deployment_delay/60} minutes before deploying frontend...")
+        print(f"Sleeping {deployment_delay/60} minutes before deploying frontend...")
+        time.sleep(deployment_delay)
+        return True
+    elif (serv_type == 'frontend'):
+        logger.info(f"Sleeping {frontend_delay/60} minutes after frontend deployment triggered.")
+        print(f"Sleeping {frontend_delay/60} minutes after frontend deployment triggered.")
+        _append_log(deployment, f"Sleeping for {frontend_delay/60} minutes so frontend deployment finishes")
+        time.sleep(frontend_delay)
+        return True
+    elif (serv_type == 'domain'):
+        logger.info(f"Sleeping {domain_delay/60} minutes for domains propagation")
+        print(f"Sleeping {domain_delay/60} minutes for domains propagation")
+        _append_log(deployment, f"Sleeping for {domain_delay/60} minutes for domains propagation.")
+        time.sleep(domain_delay)
+        return True
+    
     
 # -------------------------
 # main_deployment_function
@@ -1107,7 +1137,7 @@ def main_deployment_function(deployment_id: int):
         return
 
     # Step 12: deploy backend service
-    deployment_delay = 180
+
     print('\n Going to trigger Backend service if exists\n')
     ok = _run_step_and_record(
         deployment,
@@ -1121,10 +1151,14 @@ def main_deployment_function(deployment_id: int):
         return
 
     # wait 3 minutes before frontend deploy
-    logger.info(f"Sleeping {deployment_delay/60} minutes before deploying frontend...")
-    _append_log(deployment, f"Sleeping for {deployment_delay/60} minutes before deploying frontend...")
-    print(f"Sleeping {deployment_delay/60} minutes before deploying frontend...")
-    time.sleep(deployment_delay)
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "backend-wait-deploy",
+        lambda d, t: _step_waiting_for_service(d, t, 'backend'),
+        tenant_service=backend_ts,
+    )
+    
 
     # Step 13: deploy frontend service
     ok = _run_step_and_record(
@@ -1138,13 +1172,24 @@ def main_deployment_function(deployment_id: int):
         logger.info("main_deployment_function: frontend deployment failed; exiting for deployment=%s", deployment_id)
         return
 
-    frontend_delay = 120
-    logger.info(f"Sleeping {frontend_delay/60} minutes after frontend deployment triggered.")
-    print(f"Sleeping {frontend_delay/60} minutes after frontend deployment triggered.")
-    _append_log(deployment, f"Sleeping for {frontend_delay/60} minutes so frontend deployment finishes")
-    time.sleep(frontend_delay)
+    # Step 14: Wait for frontend deploy
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "frontend-wait-deploy",
+        lambda d, t: _step_waiting_for_service(d, t, 'frontend'),
+        tenant_service=frontend_ts,
+    )
+    
+    # Step 14: Wait for domains
+    ok = _run_step_and_record(
+        deployment,
+        tenant,
+        "domains-wait-propagation",
+        lambda d, t: _step_waiting_for_service(d, t, 'domain'),
+    )
 
-    # Step 14: health check (wait/retries inside helper)
+    # Step 15: health check (wait/retries inside helper)
     ok = _run_step_and_record(
         deployment,
         tenant,
@@ -1156,13 +1201,14 @@ def main_deployment_function(deployment_id: int):
         logger.info("main_deployment_function: health check failed; exiting for deployment=%s", deployment_id)
         return
 
-    # Step 15: internal provision (creates superuser / seeds etc.)
+    # Step 16: internal provision (creates superuser / seeds etc.)
     ok = _run_step_and_record(
         deployment,
         tenant,
         "create-superuser",
         _step_internal_provision,
         tenant_service=backend_ts,
+    
     )
     if not ok:
         logger.info("main_deployment_function: internal provision failed; exiting for deployment=%s", deployment_id)
@@ -1171,8 +1217,23 @@ def main_deployment_function(deployment_id: int):
     # Final: mark notification step success (we don't send email here)
     _run_step_and_record(deployment, tenant, "email-notify-success", lambda d, t: True)
 
+    
+    deployment.status = 'pending'
+    deployment.save(update_fields= ['status', 'updated_at'])
     # IMPORTANT: do not set deployment.status to 'succeeded' here.
     logger.info("main_deployment_function finished checks for deployment=%s", deployment_id)
     print("\n +++++ All given tasks completed (project/backend/git) +++++ \n")
     return
 
+
+
+# entery POint
+def run_deployment(deployment_id):
+    """
+    Task wrapper to call your main function. It can be referenced as 'core.tasks.run_deployment'
+    This should not raise for expected failures; exceptions will be caught by worker and logged.
+    """
+    logger.info("run_deployment: starting deployment %s at %s", deployment_id, timezone.now())
+    # If main_deployment_function returns something, return it; else return simple dict
+    result = main_deployment_function(deployment_id)
+    return {"deployment_id": deployment_id, "finished": True}

@@ -19,7 +19,7 @@ from rest_framework.views import APIView
 from .models import (
     ProjectTemplate, ServiceTemplate,
     Tenant, TenantService, Deployment, DeploymentStep,
-    JobRecord, AuditEntry
+    JobRecord, AuditEntry,QueuedJob
 )
 
 from .serializers import (
@@ -623,7 +623,7 @@ class TenantViewSet(viewsets.ModelViewSet):
             steps_data.append({
                 'deployment': deployment,
                 'tenant_service': backend_ts,
-                'step_key': 'service-wait-deploy',
+                'step_key': 'backend-wait-deploy',
                 'order': order,
                 'status': 'pending'
             })
@@ -634,7 +634,7 @@ class TenantViewSet(viewsets.ModelViewSet):
             steps_data.append({
                 'deployment': deployment,
                 'tenant_service': frontend_ts,
-                'step_key': 'frontend-deploy',   # CORRECT KEY
+                'step_key': 'frontend-deploy', 
                 'order': order,
                 'status': 'pending'
             })
@@ -643,7 +643,7 @@ class TenantViewSet(viewsets.ModelViewSet):
             steps_data.append({
                 'deployment': deployment,
                 'tenant_service': frontend_ts,
-                'step_key': 'service-wait-deploy',
+                'step_key': 'frontend-wait-deploy',
                 'order': order,
                 'status': 'pending'
             })
@@ -750,29 +750,27 @@ class DeploymentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         deployment = self.get_object()
-
         # if already succeeded, nothing to do
         if deployment.status == "succeeded":
             return Response({"detail": "Deployment already succeeded."}, status=status.HTTP_400_BAD_REQUEST)
 
         # schedule the job to run immediately (replace existing job if any)
-        job_id = f"deployment_{deployment.id}"
-        add_job(
-            func=main_deployment_function,
-            trigger="date",
-            run_date=timezone.now(),
-            args=[deployment.id],
-            id=job_id,
-            replace_existing=True,
-            max_instances=1,
+        
+        job = QueuedJob.enqueue(
+        task_name="core.tasks.run_deployment",   # dotted path to function
+        args=[deployment.id],
+        kwargs={},
+        created_by=None,                        # put request.user or AllUsers ref if you have it
+        next_run_at=timezone.now(),
+        priority=50,
+        max_attempts=5,
         )
 
         # update status to pending/running based on your convention
-        deployment.status = "pending"
         deployment.trigger_reason = 'resume'
         deployment.save(update_fields=["status", 'trigger_reason', "updated_at"])
 
-        return Response({"detail": "Resume scheduled", "job_id": job_id}, status=status.HTTP_202_ACCEPTED)
+        return Response({"detail": "Resume scheduled", "job_id": job.pk}, status=status.HTTP_202_ACCEPTED)
     
     @action(detail=True, methods=['post'])
     def update_status(self, request, pk=None):

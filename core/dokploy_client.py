@@ -12,7 +12,7 @@ API_BASE = getattr(settings, "DOKPLOY_API", "https://dokploy.thevista.one/api")
 API_KEY = getattr(settings, "DOKPLOY_TOKEN", None)
 
 # Default retry settings (can override from Django settings)
-DEFAULT_MAX_RETRIES = getattr(settings, "DOKPLOY_MAX_RETRIES", 5)
+DEFAULT_MAX_RETRIES = getattr(settings, "DOKPLOY_MAX_RETRIES", 4)
 DEFAULT_RETRY_DELAY = getattr(settings, "DOKPLOY_RETRY_DELAY", 20)  # seconds, base delay
 DEFAULT_BACKOFF_FACTOR = getattr(settings, "DOKPLOY_BACKOFF_FACTOR", 2.0)
 
